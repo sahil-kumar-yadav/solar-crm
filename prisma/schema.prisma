@@ -1,0 +1,238 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ========== LOCALIZED DATA MODELS ==========
+
+// Utilities - Region-specific rate schedules
+model Utility {
+  id                    String   @id @default(cuid())
+  name                  String
+  state                 String   // e.g., "CA", "TX"
+  zipCode               String
+  baseRatePerKwh        Float    // Current $/kWh
+  rateEscalationPercent Float    // Annual escalation % (e.g., 3.5)
+  tieredRates           Boolean  // Whether utility uses tiered pricing
+  netMeteringAvailable  Boolean
+  netMeteringCredit     Float    // $/kWh for excess production
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  leads                 Lead[]
+  rates                 UtilityRate[]
+}
+
+// Utility rate tiers (for tiered pricing utilities)
+model UtilityRate {
+  id           String  @id @default(cuid())
+  utilityId    String
+  utility      Utility @relation(fields: [utilityId], references: [id])
+  tierLevel    Int     // 1, 2, 3, etc.
+  maxKwhUsage  Float   // e.g., tier 1: 0-300 kWh
+  ratePerKwh   Float   // $/kWh for this tier
+  createdAt    DateTime @default(now())
+
+  @@unique([utilityId, tierLevel])
+}
+
+// Incentives - Federal, State, and Utility level
+model Incentive {
+  id              String   @id @default(cuid())
+  type            String   // "federal_tax_credit", "state_rebate", "utility_rebate", "srec"
+  name            String
+  description     String
+  state           String?  // null = federal, otherwise state code
+  zipCode         String?  // null = statewide, otherwise specific zip
+  incentiveAmount Float    // $ amount or % of system cost
+  isPercentage    Boolean  // true if % of cost, false if flat $
+  maxAmount       Float?   // Max incentive cap if applicable
+  expirationDate  DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// AHJ (Authority Having Jurisdiction) - Permit and inspection timelines
+model AHJ {
+  id                      String   @id @default(cuid())
+  countyName              String
+  state                   String
+  city                    String?
+  avgPermitDays           Int      // Average days to receive permit
+  avgInspectionWaitDays   Int      // Average days to schedule inspection
+  permitCostBaseline      Float    // $ baseline permit cost
+  inspectionFeeBaseline   Float    // $ baseline inspection fee
+  requiresElectricalSealed Boolean  // Whether PE signature required
+  createdAt               DateTime @default(now())
+
+  leads                   Lead[]
+}
+
+// Financing Programs - Lender-specific, state-dependent
+model FinancingProgram {
+  id                String   @id @default(cuid())
+  lenderName        String
+  programName       String
+  state             String
+  minCreditScore    Int
+  maxLoanAmount     Float
+  minLoanAmount     Float
+  interestRate      Float    // APR %
+  loanTermYears     Int
+  originationFee    Float    // % of loan amount
+  canUseIncentives  Boolean  // Whether customer can use incentives with this program
+  createdAt         DateTime @default(now())
+
+  proposals         Proposal[]
+}
+
+// Territory Mapping - Sales rep assignments by region
+model Territory {
+  id          String   @id @default(cuid())
+  name        String
+  state       String
+  zipCodes    String   // JSON array or comma-separated
+  salesRepId  String?  // Link to sales rep (can extend to User model later)
+  createdAt   DateTime @default(now())
+
+  leads       Lead[]
+}
+
+// Sales Tax Rates - by state/zip
+model SalesTaxRate {
+  id        String   @id @default(cuid())
+  state     String
+  zipCode   String?
+  taxRate   Float    // e.g., 0.0875 for 8.75%
+  createdAt DateTime @default(now())
+
+  @@unique([state, zipCode])
+}
+
+// Regional weather production multiplier
+model RegionalWeatherData {
+  id                    String   @id @default(cuid())
+  zipCode               String
+  state                 String
+  annualPeakSunHours    Float    // Average peak sun hours per day
+  productionMultiplier  Float    // Regional adjustment factor (1.0 = national avg)
+  weatherAdjustment     Float    // Seasonal variation factor
+  createdAt             DateTime @default(now())
+
+  @@unique([zipCode, state])
+}
+
+// ========== CORE CRM MODELS ==========
+
+// Lead - Primary entity for sales pipeline
+model Lead {
+  id                    String   @id @default(cuid())
+  firstName             String
+  lastName              String
+  email                 String
+  phone                 String
+  address               String
+  zipCode               String
+  state                 String
+  propertyType          String   // "residential", "commercial", "non-profit"
+  homeOwner             Boolean
+  monthlyElectricBill   Float    // $ average monthly bill
+  utilityId             String?
+  utility               Utility? @relation(fields: [utilityId], references: [id])
+  ahjId                 String?
+  ahj                   AHJ?     @relation(fields: [ahjId], references: [id])
+  territoryId           String?
+  territory             Territory? @relation(fields: [territoryId], references: [id])
+
+  // Lead scoring
+  score                 String   // "hot", "warm", "cold"
+  financing             String   // "cash", "loan", "lease", "unknown"
+  roofType              String   // "asphalt", "metal", "tile", "flat"
+  roofAgeYears          Int?
+  creditRange           String?  // "excellent", "good", "fair", "poor"
+  appointmentScheduled  Boolean  @default(false)
+  engagementNotes       String?
+
+  // Workflow
+  status                String   @default("new") // "new", "qualified", "surveyed", "proposed", "negotiating", "signed", "lost"
+  nextAction            String?
+  objections            String?  // JSON or text
+  lastTouchDate         DateTime @default(now())
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  proposals             Proposal[]
+  activities            LeadActivity[]
+}
+
+// Lead Activity Log - Track engagement
+model LeadActivity {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  type      String   // "call", "email", "meeting", "survey", "proposal_sent"
+  notes     String?
+  createdAt DateTime @default(now())
+}
+
+// Proposal - Solar system proposal for a lead
+model Proposal {
+  id                        String   @id @default(cuid())
+  leadId                    String
+  lead                      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  proposalNumber            String   @unique
+  systemSizeKw              Float    // System size in kW
+  estimatedAnnualProduction Float    // kWh/year
+  offsetPercentage          Float    // % of annual consumption
+  monthlyConsumptionKwh     Float
+  roofConditionApproved     Boolean
+
+  // Financial projections (25-year)
+  projectedAnnualSavings    Float    // Year 1 savings
+  projectedTotalSavings     Float    // 25-year total
+  roiPercent                Float    // 25-year ROI
+  paybackYears              Float
+  irr                       Float?   // Internal rate of return if calculated
+
+  // Pricing options
+  cashPrice                 Float
+  loanFinancingId           String?
+  loanProgram               FinancingProgram? @relation(fields: [loanFinancingId], references: [id])
+  loanAmount                Float?
+  loanMonthlyPayment        Float?
+  loanTotalCost             Float?
+  leaseAvailable            Boolean  @default(false)
+  leaseMonthlyPayment       Float?
+
+  // Incentives applied
+  federalTaxCredit          Float    @default(0) // 30% ITC typically
+  stateIncentives           Float    @default(0)
+  utilityRebates            Float    @default(0)
+  incentiveIds              String   // JSON array of applied incentive IDs
+  totalIncentives           Float    @default(0)
+
+  // Environmental impact
+  annualCo2Offset           Float    // Metric tons CO2/year
+  netMeteredProduction      Float?   // kWh exported to grid annually
+
+  // Assumptions documented
+  utilityRateEscalation     Float    @default(3.5) // % annual escalation
+  productionDegradation     Float    @default(0.5) // % annual decline
+  assumptions               String   // JSON blob of calculation inputs
+
+  // Status
+  status                    String   @default("draft") // "draft", "sent", "accepted", "rejected", "installed"
+  expirationDate            DateTime?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+}
