@@ -1,12 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import prisma from "@/lib/prismaClient";
+import { z } from "zod";
 import {
   scoreLeadByRules,
   LeadScoringInput,
   getRebuttals,
 } from "@/lib/engines/leadScoringEngine";
 
-const prisma = new PrismaClient();
+const LeadCreateSchema = z.object({
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  email: z.string().email(),
+  phone: z.string().min(7),
+  address: z.string().min(1),
+  city: z.string().optional(),
+  zipCode: z.string().min(3),
+  state: z.string().min(2),
+  monthlyElectricBill: z.number().nonnegative(),
+  propertyType: z.enum(["residential", "commercial", "non-profit"]),
+  utilityId: z.string(),
+  homeOwner: z.boolean().optional(),
+  roofType: z.string().optional(),
+  roofAgeYears: z.number().optional(),
+  creditRange: z.string().optional(),
+  financing: z.enum(["cash", "loan", "lease", "unknown"]).optional(),
+  appointmentScheduled: z.boolean().optional(),
+  notes: z.string().optional(),
+});
 
 /**
  * POST /api/leads/create
@@ -14,66 +34,44 @@ const prisma = new PrismaClient();
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-
-    // Validate required fields
-    const required = [
-      "firstName",
-      "lastName",
-      "email",
-      "phone",
-      "address",
-      "zipCode",
-      "state",
-      "monthlyElectricBill",
-      "propertyType",
-      "utilityId",
-    ];
-    for (const field of required) {
-      if (!body[field]) {
-        return NextResponse.json(
-          { error: `Missing required field: ${field}` },
-          { status: 400 }
-        );
+    // Optional API key enforcement
+    const API_KEY = process.env.API_KEY;
+    if (API_KEY) {
+      const provided = request.headers.get("x-api-key") || "";
+      if (provided !== API_KEY) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
       }
     }
 
-    // Verify utility and AHJ exist
-    const utility = await prisma.utility.findUnique({
-      where: { id: body.utilityId },
-    });
-
-    if (!utility) {
+    const body = await request.json();
+    const parsed = LeadCreateSchema.safeParse(body);
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Invalid utility ID" },
+        { error: "Invalid payload", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
+    const data = parsed.data;
 
-    // Find matching AHJ
-    const ahj = await prisma.aHJ.findFirst({
-      where: {
-        state: body.state,
-        city: body.city || undefined,
-      },
-    });
+    // Verify utility exists
+    const utility = await prisma.utility.findUnique({ where: { id: data.utilityId } });
+    if (!utility) {
+      return NextResponse.json({ error: "Invalid utility ID" }, { status: 400 });
+    }
 
-    // Find territory assignment
-    const territory = await prisma.territory.findFirst({
-      where: {
-        state: body.state,
-      },
-    });
+    // Find matching AHJ and territory
+    const ahj = await prisma.aHJ.findFirst({ where: { state: data.state, city: data.city || undefined } });
+    const territory = await prisma.territory.findFirst({ where: { state: data.state } });
 
     // Run lead scoring engine
     const scoringInput: LeadScoringInput = {
-      monthlyElectricBill: body.monthlyElectricBill,
-      homeOwner: body.homeOwner || false,
-      propertyType: body.propertyType,
-      financingReady: body.financing || "unknown",
-      appointmentScheduled: body.appointmentScheduled || false,
-      engagementActivity: 0, // New lead
-      creditRange: body.creditRange,
+      monthlyElectricBill: data.monthlyElectricBill,
+      homeOwner: data.homeOwner || false,
+      propertyType: data.propertyType,
+      financingReady: data.financing || "unknown",
+      appointmentScheduled: data.appointmentScheduled || false,
+      engagementActivity: 0,
+      creditRange: data.creditRange,
     };
 
     const scoring = scoreLeadByRules(scoringInput);
@@ -82,27 +80,27 @@ export async function POST(request: NextRequest) {
     // Create lead
     const lead = await prisma.lead.create({
       data: {
-        firstName: body.firstName,
-        lastName: body.lastName,
-        email: body.email,
-        phone: body.phone,
-        address: body.address,
-        zipCode: body.zipCode,
-        state: body.state,
-        propertyType: body.propertyType,
-        homeOwner: body.homeOwner || false,
-        monthlyElectricBill: body.monthlyElectricBill,
-        utilityId: body.utilityId,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        email: data.email,
+        phone: data.phone,
+        address: data.address,
+        zipCode: data.zipCode,
+        state: data.state,
+        propertyType: data.propertyType,
+        homeOwner: data.homeOwner || false,
+        monthlyElectricBill: data.monthlyElectricBill,
+        utilityId: data.utilityId,
         ahjId: ahj?.id,
         territoryId: territory?.id,
-        roofType: body.roofType || "unknown",
-        roofAgeYears: body.roofAgeYears,
-        creditRange: body.creditRange,
+        roofType: data.roofType || "unknown",
+        roofAgeYears: data.roofAgeYears,
+        creditRange: data.creditRange,
         score: scoring.score,
-        financing: body.financing || "unknown",
+        financing: data.financing || "unknown",
         nextAction: scoring.nextAction,
         objections: JSON.stringify(rebuttals),
-        engagementNotes: body.notes,
+        engagementNotes: data.notes,
         status: "new",
       },
       include: {
@@ -144,10 +142,7 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     console.error("Lead creation error:", error);
-    return NextResponse.json(
-      { error: "Failed to create lead" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to create lead" }, { status: 500 });
   }
 }
 
@@ -157,6 +152,14 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   try {
+    // Optional API key enforcement
+    const API_KEY = process.env.API_KEY;
+    if (API_KEY) {
+      const provided = request.headers.get("x-api-key") || "";
+      if (provided !== API_KEY) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    }
     const searchParams = request.nextUrl.searchParams;
     const score = searchParams.get("score");
     const state = searchParams.get("state");
